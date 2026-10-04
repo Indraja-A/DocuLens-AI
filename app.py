@@ -22,9 +22,10 @@ load_dotenv()
 
 API_KEY = os.getenv("GEMINI_API_KEY")
 
+# CHANGED: default generation model
 GENERATION_MODEL = os.getenv(
     "GEMINI_MODEL",
-    "gemini-3.8-flash"
+    "gemini-3.7-flash"
 )
 
 FALLBACK_MODEL = os.getenv(
@@ -463,7 +464,6 @@ def extract_pdf(
                 page.get_text("text")
             )
 
-            # Normal text PDF
             if len(native_text) >= 30:
 
                 pages.append(
@@ -477,7 +477,6 @@ def extract_pdf(
 
                 continue
 
-            # Scanned PDF -> OCR
             try:
 
                 matrix = fitz.Matrix(
@@ -551,7 +550,6 @@ def extract_docx(
 
         content = []
 
-        # Paragraphs
         for paragraph in document.paragraphs:
 
             text = clean_text(
@@ -561,7 +559,6 @@ def extract_docx(
             if text:
                 content.append(text)
 
-        # Tables
         for table_index, table in enumerate(
             document.tables,
             start=1
