@@ -1,5 +1,7 @@
 import os
 import re
+import time
+import random
 from pathlib import Path
 
 import numpy as np
@@ -8,72 +10,44 @@ import fitz
 from docx import Document
 from dotenv import load_dotenv
 from google import genai
-from google.genai import errors
+from google.genai import types
 
 
 # ============================================================
 # DOCULENS AI
-# INTELLIGENT DOCUMENT INVESTIGATOR
+# Intelligent Document Investigator
 # ============================================================
 
 load_dotenv()
 
 API_KEY = os.getenv("GEMINI_API_KEY")
 
-if not API_KEY:
-    st.error(
-        "Gemini API key not found. "
-        "Please check your .env file."
-    )
-    st.stop()
-
-client = genai.Client(
-    api_key=API_KEY
+GENERATION_MODEL = os.getenv(
+    "GEMINI_MODEL",
+    "gemini-3.8-flash"
 )
 
+FALLBACK_MODEL = os.getenv(
+    "GEMINI_FALLBACK_MODEL",
+    ""
+).strip()
 
-# ============================================================
-# GEMINI MODELS
-# ============================================================
+EMBEDDING_MODEL = os.getenv(
+    "GEMINI_EMBEDDING_MODEL",
+    "gemini-embedding-2"
+)
 
-GENERATION_MODELS = [
-    "gemini-3.5-flash-lite",
-    "gemini-3.6-flash",
-    "gemini-3.7-flash",
-    "gemini-3.8-flash"
-]
-
-EMBEDDING_MODEL = "gemini-embedding-2"
-
-
-# ============================================================
-# DIRECTORIES
-# ============================================================
+MAX_GENERATION_RETRIES = 4
+CHUNK_SIZE = 1200
+CHUNK_OVERLAP = 200
+TOP_K = 6
+EMBEDDING_DIMENSION = 768
 
 UPLOAD_DIR = Path("data") / "uploads"
-
-if UPLOAD_DIR.exists() and not UPLOAD_DIR.is_dir():
-
-    st.error(
-        "The path 'data/uploads' exists as a file "
-        "instead of a folder."
-    )
-
-    st.stop()
-
 UPLOAD_DIR.mkdir(
     parents=True,
     exist_ok=True
 )
-
-
-# ============================================================
-# SETTINGS
-# ============================================================
-
-CHUNK_SIZE = 1200
-CHUNK_OVERLAP = 200
-TOP_K = 5
 
 
 # ============================================================
@@ -89,50 +63,118 @@ st.set_page_config(
 
 
 # ============================================================
-# CUSTOM UI
+# API CHECK
+# ============================================================
+
+if not API_KEY:
+
+    st.error(
+        "❌ GEMINI_API_KEY is missing.\n\n"
+        "Please add GEMINI_API_KEY to your .env file."
+    )
+
+    st.stop()
+
+
+client = genai.Client(
+    api_key=API_KEY
+)
+
+
+# ============================================================
+# CUSTOM CSS
 # ============================================================
 
 st.markdown(
-    """
-    <style>
+"""
+<style>
 
-    .main-title {
-        font-size: 42px;
-        font-weight: 800;
-        margin-bottom: 0px;
-    }
+.title {
+    font-size: 42px;
+    font-weight: 800;
+    margin-bottom: 0;
+}
 
-    .subtitle {
-        font-size: 17px;
-        color: #777;
-        margin-bottom: 25px;
-    }
+.subtitle {
+    color: #777;
+    font-size: 17px;
+    margin-bottom: 22px;
+}
 
-    .hero-box {
-        padding: 25px;
-        border-radius: 16px;
-        border: 1px solid #dddddd;
-        margin-bottom: 25px;
-    }
+.hero {
+    padding: 28px;
+    border: 1px solid rgba(128,128,128,.25);
+    border-radius: 18px;
+    margin-bottom: 20px;
+}
 
-    .answer-box {
-        padding: 22px;
-        border-radius: 14px;
-        border: 1px solid #dddddd;
-        margin-top: 10px;
-        margin-bottom: 20px;
-    }
+.result-card {
+    padding: 22px;
+    border: 1px solid rgba(128,128,128,.25);
+    border-radius: 16px;
+    margin-top: 15px;
+}
 
-    .feature-card {
-        padding: 18px;
-        border-radius: 12px;
-        border: 1px solid #dddddd;
-        min-height: 120px;
-    }
+.conflict-card {
+    padding: 22px;
+    border: 1px solid rgba(128,128,128,.25);
+    border-radius: 16px;
+    margin-top: 15px;
+}
 
-    </style>
-    """,
-    unsafe_allow_html=True
+.metric {
+    padding: 18px;
+    border: 1px solid rgba(128,128,128,.25);
+    border-radius: 14px;
+    text-align: center;
+    min-height: 105px;
+}
+
+.metric-number {
+    font-size: 28px;
+    font-weight: 800;
+}
+
+.metric-label {
+    color: #777;
+    font-size: 13px;
+}
+
+.high {
+    border-left: 5px solid #2e8b57;
+    padding: 13px 16px;
+    border-radius: 8px;
+    border-top: 1px solid rgba(128,128,128,.2);
+    border-right: 1px solid rgba(128,128,128,.2);
+    border-bottom: 1px solid rgba(128,128,128,.2);
+}
+
+.moderate {
+    border-left: 5px solid #d99a00;
+    padding: 13px 16px;
+    border-radius: 8px;
+    border-top: 1px solid rgba(128,128,128,.2);
+    border-right: 1px solid rgba(128,128,128,.2);
+    border-bottom: 1px solid rgba(128,128,128,.2);
+}
+
+.low {
+    border-left: 5px solid #c0392b;
+    padding: 13px 16px;
+    border-radius: 8px;
+    border-top: 1px solid rgba(128,128,128,.2);
+    border-right: 1px solid rgba(128,128,128,.2);
+    border-bottom: 1px solid rgba(128,128,128,.2);
+}
+
+.small {
+    color: #777;
+    font-size: 13px;
+}
+
+</style>
+""",
+unsafe_allow_html=True
 )
 
 
@@ -150,7 +192,239 @@ if "history" not in st.session_state:
     st.session_state.history = []
 
 if "contradictions" not in st.session_state:
-    st.session_state.contradictions = []
+    st.session_state.contradictions = ""
+
+if "last_answer" not in st.session_state:
+    st.session_state.last_answer = ""
+
+if "last_question" not in st.session_state:
+    st.session_state.last_question = ""
+
+if "last_retrieved" not in st.session_state:
+    st.session_state.last_retrieved = []
+
+if "processed" not in st.session_state:
+    st.session_state.processed = False
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def clean_text(text):
+
+    return re.sub(
+        r"\s+",
+        " ",
+        text or ""
+    ).strip()
+
+
+def page_label(page):
+
+    if page is None:
+        return "Page N/A"
+
+    return f"Page {page}"
+
+
+# ============================================================
+# GEMINI RELIABILITY
+# ============================================================
+
+def is_transient_error(error):
+
+    message = str(error).lower()
+
+    transient_markers = (
+        "429",
+        "500",
+        "502",
+        "503",
+        "504",
+        "unavailable",
+        "high demand",
+        "overloaded",
+        "temporarily unavailable",
+        "resource exhausted",
+        "deadline exceeded"
+    )
+
+    return any(
+        marker in message
+        for marker in transient_markers
+    )
+
+
+def call_gemini_once(
+    model,
+    prompt,
+    media_bytes=None,
+    mime_type=None
+):
+
+    if media_bytes is None:
+
+        response = client.models.generate_content(
+            model=model,
+            contents=prompt
+        )
+
+    else:
+
+        media_part = types.Part.from_bytes(
+            data=media_bytes,
+            mime_type=mime_type
+        )
+
+        response = client.models.generate_content(
+            model=model,
+            contents=[
+                prompt,
+                media_part
+            ]
+        )
+
+    result = (
+        response.text or ""
+    ).strip()
+
+    if not result:
+
+        raise RuntimeError(
+            "Gemini returned an empty response."
+        )
+
+    return result
+
+
+def generate_text(
+    prompt,
+    media_bytes=None,
+    mime_type=None
+):
+
+    models = [
+        GENERATION_MODEL
+    ]
+
+    if (
+        FALLBACK_MODEL
+        and FALLBACK_MODEL != GENERATION_MODEL
+    ):
+
+        models.append(
+            FALLBACK_MODEL
+        )
+
+    last_error = None
+
+    for model_index, model in enumerate(models):
+
+        for attempt in range(
+            MAX_GENERATION_RETRIES
+        ):
+
+            try:
+
+                return call_gemini_once(
+                    model=model,
+                    prompt=prompt,
+                    media_bytes=media_bytes,
+                    mime_type=mime_type
+                )
+
+            except Exception as error:
+
+                last_error = error
+
+                if not is_transient_error(
+                    error
+                ):
+
+                    raise RuntimeError(
+                        str(error)
+                    ) from error
+
+                if attempt < (
+                    MAX_GENERATION_RETRIES - 1
+                ):
+
+                    delay = (
+                        1.5 * (2 ** attempt)
+                        + random.uniform(0, 0.75)
+                    )
+
+                    time.sleep(delay)
+
+        if model_index < len(models) - 1:
+            continue
+
+    raise RuntimeError(
+        "Gemini is temporarily unavailable because "
+        "the model is busy or experiencing high demand.\n\n"
+        "DocuLens successfully retrieved your document "
+        "evidence, but the final AI answer could not "
+        "be generated.\n\n"
+        "Please click Investigate again in a few seconds."
+    ) from last_error
+
+
+# ============================================================
+# IMAGE OCR
+# ============================================================
+
+def ocr_image(
+    image_bytes,
+    mime_type,
+    source_name,
+    page=None
+):
+
+    prompt = """
+You are the OCR engine for DocuLens AI.
+
+Read the supplied image carefully.
+
+Extract all meaningful visible text.
+
+Rules:
+
+1. Preserve names exactly.
+2. Preserve dates exactly.
+3. Preserve numbers exactly.
+4. Preserve amounts exactly.
+5. Preserve deadlines exactly.
+6. Preserve headings and labels.
+7. Preserve important instructions.
+8. Maintain logical reading order.
+9. Do not invent missing text.
+10. If something is unreadable, write [UNCLEAR].
+
+Return ONLY the extracted document text.
+"""
+
+    extracted = generate_text(
+        prompt,
+        media_bytes=image_bytes,
+        mime_type=mime_type
+    )
+
+    if not extracted:
+        return []
+
+    return [
+        {
+            "text": extracted,
+            "source": source_name,
+            "page": page,
+            "type": (
+                "IMAGE/OCR"
+                if page is None
+                else "PDF/OCR"
+            )
+        }
+    ]
 
 
 # ============================================================
@@ -162,34 +436,92 @@ def extract_pdf(
     filename
 ):
 
+    try:
+
+        pdf = fitz.open(
+            stream=file_bytes,
+            filetype="pdf"
+        )
+
+    except Exception as error:
+
+        raise RuntimeError(
+            f"Invalid or unreadable PDF: {error}"
+        )
+
     pages = []
 
-    pdf = fitz.open(
-        stream=file_bytes,
-        filetype="pdf"
-    )
+    try:
 
-    for page_number, page in enumerate(
-        pdf,
-        start=1
-    ):
+        for page_index in range(len(pdf)):
 
-        text = page.get_text(
-            "text"
-        ).strip()
+            page = pdf[page_index]
 
-        if text:
+            page_number = page_index + 1
 
-            pages.append(
-                {
-                    "text": text,
-                    "source": filename,
-                    "page": page_number,
-                    "type": "PDF"
-                }
+            native_text = clean_text(
+                page.get_text("text")
             )
 
-    pdf.close()
+            # Normal text PDF
+            if len(native_text) >= 30:
+
+                pages.append(
+                    {
+                        "text": native_text,
+                        "source": filename,
+                        "page": page_number,
+                        "type": "PDF"
+                    }
+                )
+
+                continue
+
+            # Scanned PDF -> OCR
+            try:
+
+                matrix = fitz.Matrix(
+                    2.0,
+                    2.0
+                )
+
+                pixmap = page.get_pixmap(
+                    matrix=matrix,
+                    alpha=False
+                )
+
+                image_bytes = pixmap.tobytes(
+                    "png"
+                )
+
+                ocr_result = ocr_image(
+                    image_bytes=image_bytes,
+                    mime_type="image/png",
+                    source_name=filename,
+                    page=page_number
+                )
+
+                pages.extend(
+                    ocr_result
+                )
+
+            except Exception:
+
+                pages.append(
+                    {
+                        "text": (
+                            "[This PDF page could "
+                            "not be OCR processed.]"
+                        ),
+                        "source": filename,
+                        "page": page_number,
+                        "type": "PDF"
+                    }
+                )
+
+    finally:
+
+        pdf.close()
 
     return pages
 
@@ -203,43 +535,89 @@ def extract_docx(
     filename
 ):
 
-    temp_path = UPLOAD_DIR / filename
-
-    with open(
-        temp_path,
-        "wb"
-    ) as file:
-
-        file.write(
-            file_bytes
-        )
-
-    document = Document(
-        temp_path
-    )
-
-    text = "\n".join(
-        paragraph.text
-        for paragraph in document.paragraphs
-        if paragraph.text.strip()
+    temp_path = (
+        UPLOAD_DIR / filename
     )
 
     try:
-        temp_path.unlink()
-    except Exception:
-        pass
 
-    if not text.strip():
-        return []
+        temp_path.write_bytes(
+            file_bytes
+        )
 
-    return [
-        {
-            "text": text,
-            "source": filename,
-            "page": None,
-            "type": "DOCX"
-        }
-    ]
+        document = Document(
+            temp_path
+        )
+
+        content = []
+
+        # Paragraphs
+        for paragraph in document.paragraphs:
+
+            text = clean_text(
+                paragraph.text
+            )
+
+            if text:
+                content.append(text)
+
+        # Tables
+        for table_index, table in enumerate(
+            document.tables,
+            start=1
+        ):
+
+            content.append(
+                f"Table {table_index}:"
+            )
+
+            for row in table.rows:
+
+                cells = []
+
+                for cell in row.cells:
+
+                    text = clean_text(
+                        cell.text
+                    )
+
+                    if text:
+                        cells.append(text)
+
+                if cells:
+
+                    content.append(
+                        " | ".join(cells)
+                    )
+
+        full_text = "\n".join(
+            content
+        ).strip()
+
+        if not full_text:
+            return []
+
+        return [
+            {
+                "text": full_text,
+                "source": filename,
+                "page": None,
+                "type": "DOCX"
+            }
+        ]
+
+    except Exception as error:
+
+        raise RuntimeError(
+            f"Could not read DOCX: {error}"
+        )
+
+    finally:
+
+        try:
+            temp_path.unlink()
+        except Exception:
+            pass
 
 
 # ============================================================
@@ -270,117 +648,12 @@ def extract_txt(
 
 
 # ============================================================
-# TEXT CHUNKING
+# FILE ROUTER
 # ============================================================
 
-def split_text(
-    text,
-    chunk_size=CHUNK_SIZE,
-    overlap=CHUNK_OVERLAP
-):
-
-    text = re.sub(
-        r"\s+",
-        " ",
-        text
-    ).strip()
-
-    if len(text) <= chunk_size:
-        return [text]
-
-    chunks = []
-
-    start = 0
-
-    while start < len(text):
-
-        end = start + chunk_size
-
-        chunk = text[
-            start:end
-        ].strip()
-
-        if chunk:
-            chunks.append(
-                chunk
-            )
-
-        start = end - overlap
-
-    return chunks
-
-
-# ============================================================
-# GEMINI EMBEDDING
-# ============================================================
-
-def get_embedding(
-    text,
-    task_type="document"
-):
-
-    if task_type == "query":
-
-        content = (
-            "task: question answering | "
-            f"query: {text}"
-        )
-
-    else:
-
-        content = (
-            "title: document section | "
-            f"text: {text}"
-        )
-
-    result = client.models.embed_content(
-        model=EMBEDDING_MODEL,
-        contents=content,
-        config={
-            "output_dimensionality": 768
-        }
-    )
-
-    return np.array(
-        result.embeddings[0].values,
-        dtype=np.float32
-    )
-
-
-# ============================================================
-# COSINE SIMILARITY
-# ============================================================
-
-def cosine_similarity(
-    a,
-    b
-):
-
-    denominator = (
-        np.linalg.norm(a)
-        *
-        np.linalg.norm(b)
-    )
-
-    if denominator == 0:
-        return 0.0
-
-    return float(
-        np.dot(a, b)
-        /
-        denominator
-    )
-
-
-# ============================================================
-# PROCESS DOCUMENT
-# ============================================================
-
-def process_uploaded_file(
+def extract_file(
     uploaded_file
 ):
-
-    file_bytes = uploaded_file.getvalue()
 
     filename = uploaded_file.name
 
@@ -390,46 +663,106 @@ def process_uploaded_file(
         .lower()
     )
 
+    file_bytes = (
+        uploaded_file.getvalue()
+    )
+
     if extension == ".pdf":
 
-        pages = extract_pdf(
+        return extract_pdf(
             file_bytes,
             filename
         )
 
-    elif extension == ".docx":
+    if extension == ".docx":
 
-        pages = extract_docx(
+        return extract_docx(
             file_bytes,
             filename
         )
 
-    elif extension == ".txt":
+    if extension == ".txt":
 
-        pages = extract_txt(
+        return extract_txt(
             file_bytes,
             filename
         )
 
-    else:
+    if extension in {
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".webp"
+    }:
 
+        mime_types = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp"
+        }
+
+        return ocr_image(
+            image_bytes=file_bytes,
+            mime_type=mime_types[extension],
+            source_name=filename
+        )
+
+    return []
+
+
+# ============================================================
+# CHUNKING
+# ============================================================
+
+def split_text(text):
+
+    text = clean_text(text)
+
+    if not text:
         return []
 
-    all_chunks = []
+    if len(text) <= CHUNK_SIZE:
+        return [text]
+
+    chunks = []
+
+    start = 0
+
+    while start < len(text):
+
+        end = start + CHUNK_SIZE
+
+        chunk = text[start:end].strip()
+
+        if chunk:
+            chunks.append(chunk)
+
+        if end >= len(text):
+            break
+
+        start = end - CHUNK_OVERLAP
+
+    return chunks
+
+
+def make_chunks(pages):
+
+    chunks = []
 
     for page in pages:
 
-        chunks = split_text(
+        page_chunks = split_text(
             page["text"]
         )
 
-        for index, chunk in enumerate(
-            chunks
+        for index, text in enumerate(
+            page_chunks
         ):
 
-            all_chunks.append(
+            chunks.append(
                 {
-                    "text": chunk,
+                    "text": text,
                     "source": page["source"],
                     "page": page["page"],
                     "type": page["type"],
@@ -437,218 +770,342 @@ def process_uploaded_file(
                 }
             )
 
-    return all_chunks
+    return chunks
 
 
 # ============================================================
-# BUILD INDEX
+# EMBEDDINGS
 # ============================================================
 
-def build_index(
-    chunks
-):
+def get_embedding(text):
 
-    indexed_chunks = []
-
-    progress = st.progress(
-        0
+    result = client.models.embed_content(
+        model=EMBEDDING_MODEL,
+        contents=text,
+        config={
+            "output_dimensionality":
+                EMBEDDING_DIMENSION
+        }
     )
 
-    total = len(chunks)
+    if not result.embeddings:
 
-    for index, chunk in enumerate(
-        chunks
-    ):
+        raise RuntimeError(
+            "Gemini returned no embedding."
+        )
+
+    return np.array(
+        result.embeddings[0].values,
+        dtype=np.float32
+    )
+
+
+def cosine_similarity(
+    a,
+    b
+):
+
+    denominator = (
+        np.linalg.norm(a)
+        * np.linalg.norm(b)
+    )
+
+    if denominator == 0:
+        return 0.0
+
+    return float(
+        np.dot(a, b) / denominator
+    )
+
+
+def build_index(chunks):
+
+    indexed = []
+
+    progress = st.progress(0)
+
+    for index, chunk in enumerate(chunks):
 
         try:
 
             embedding = get_embedding(
-                chunk["text"],
-                task_type="document"
+                chunk["text"]
             )
 
-            item = chunk.copy()
+            item = dict(chunk)
 
             item["embedding"] = embedding
 
-            indexed_chunks.append(
-                item
-            )
+            indexed.append(item)
 
         except Exception as error:
 
             st.warning(
-                "Could not process one "
-                f"document section: {error}"
+                f"Could not index "
+                f"{chunk['source']} "
+                f"{page_label(chunk['page'])}: "
+                f"{error}"
             )
 
         progress.progress(
-            (index + 1) / total
+            (index + 1) / max(1, len(chunks))
         )
 
     progress.empty()
 
-    return indexed_chunks
+    return indexed
 
 
 # ============================================================
-# RETRIEVE RELEVANT SECTIONS
+# RETRIEVAL
 # ============================================================
 
-def retrieve_chunks(
+def retrieve(
     question,
-    chunks,
     top_k=TOP_K
 ):
 
-    if not chunks:
+    if not st.session_state.chunks:
         return []
 
     query_embedding = get_embedding(
-        question,
-        task_type="query"
+        question
     )
 
-    scored_chunks = []
+    scored = []
 
-    for chunk in chunks:
+    for chunk in st.session_state.chunks:
 
         score = cosine_similarity(
             query_embedding,
             chunk["embedding"]
         )
 
-        scored_chunks.append(
+        scored.append(
             (
                 score,
                 chunk
             )
         )
 
-    scored_chunks.sort(
+    scored.sort(
         key=lambda item: item[0],
         reverse=True
     )
 
-    return scored_chunks[:top_k]
+    return scored[:top_k]
 
 
 # ============================================================
-# GEMINI REQUEST WITH FALLBACK
+# CONFIDENCE
 # ============================================================
 
-def ask_gemini(
-    prompt
+def calculate_confidence(
+    retrieved
 ):
 
-    last_error = None
+    if not retrieved:
 
-    for model_name in GENERATION_MODELS:
+        return (
+            0.0,
+            "Low",
+            "No supporting evidence was retrieved."
+        )
 
-        try:
+    scores = [
+        max(
+            0.0,
+            min(1.0, score)
+        )
+        for score, _ in retrieved
+    ]
 
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt
-            )
+    top_score = scores[0]
 
-            return response.text
+    average_score = (
+        sum(scores) / len(scores)
+    )
 
-        except errors.ServerError as error:
+    confidence = (
+        0.65 * top_score
+        + 0.35 * average_score
+    )
 
-            last_error = error
+    if confidence >= 0.75:
 
-            continue
+        return (
+            confidence,
+            "High",
+            "Strong supporting evidence was retrieved."
+        )
 
-        except Exception as error:
+    if confidence >= 0.55:
 
-            last_error = error
-
-            continue
+        return (
+            confidence,
+            "Moderate",
+            "Relevant evidence was found, but verify the answer."
+        )
 
     return (
-        "⚠️ Gemini is temporarily unavailable.\n\n"
-        "Please try again in a moment.\n\n"
-        f"Technical detail: {last_error}"
+        confidence,
+        "Low",
+        "Evidence is weak. Verification is recommended."
     )
 
 
-# ============================================================
-# GENERATE ANSWER
-# ============================================================
-
-def generate_answer(
-    question,
-    retrieved_chunks
+def show_confidence(
+    retrieved
 ):
 
-    if not retrieved_chunks:
-
-        return (
-            "The uploaded documents do not contain "
-            "enough evidence to answer this question."
+    confidence, level, explanation = (
+        calculate_confidence(
+            retrieved
         )
+    )
 
-    evidence = []
+    percentage = int(
+        round(confidence * 100)
+    )
+
+    if level == "High":
+
+        css = "high"
+        icon = "🟢"
+
+    elif level == "Moderate":
+
+        css = "moderate"
+        icon = "🟡"
+
+    else:
+
+        css = "low"
+        icon = "🔴"
+
+    st.markdown(
+        f"""
+<div class="{css}">
+    <b>
+        {icon}
+        Evidence Confidence:
+        {level} — {percentage}%
+    </b>
+    <br>
+    <span class="small">
+        {explanation}
+    </span>
+</div>
+""",
+        unsafe_allow_html=True
+    )
+
+    return confidence, level
+
+
+# ============================================================
+# EVIDENCE
+# ============================================================
+
+def build_evidence(
+    retrieved
+):
+
+    blocks = []
 
     for rank, (
         score,
         chunk
     ) in enumerate(
-        retrieved_chunks,
+        retrieved,
         start=1
     ):
 
-        page = (
-            str(chunk["page"])
-            if chunk["page"]
-            else "N/A"
-        )
-
-        evidence.append(
+        blocks.append(
             f"""
 SOURCE {rank}
 
-Document: {chunk["source"]}
-Page: {page}
-Relevance: {score:.2f}
+Document:
+{chunk["source"]}
+
+Page:
+{page_label(chunk["page"])}
+
+Type:
+{chunk["type"]}
+
+Relevance:
+{score:.3f}
 
 CONTENT:
 {chunk["text"]}
 """
         )
 
-    evidence_text = "\n".join(
-        evidence
+    return "\n".join(blocks)
+
+
+# ============================================================
+# ANSWER GENERATION
+# ============================================================
+
+def answer_question(
+    question,
+    retrieved
+):
+
+    if not retrieved:
+
+        return (
+            "The uploaded documents do not contain "
+            "enough evidence to answer this question."
+        )
+
+    confidence, level, _ = (
+        calculate_confidence(
+            retrieved
+        )
+    )
+
+    evidence = build_evidence(
+        retrieved
     )
 
     prompt = f"""
 You are DocuLens AI,
-an intelligent document investigation assistant.
+an intelligent document investigator.
 
-Answer the user's question ONLY using
-the document evidence supplied below.
+Answer the user's question using ONLY
+the supplied document evidence.
 
-RULES:
+STRICT RULES:
 
-1. Do not invent facts.
-2. Do not use outside knowledge.
-3. If evidence is insufficient, say:
-"The uploaded documents do not contain enough
-evidence to answer this question."
-4. Give a clear and concise answer.
-5. Mention supporting documents.
-6. Mention page numbers when available.
-7. If documents conflict, identify the conflict.
-8. Preserve dates, numbers and names accurately.
+1. Never use outside knowledge.
+2. Never invent facts.
+3. If information is missing, say it is not found.
+4. Preserve names exactly.
+5. Preserve dates exactly.
+6. Preserve numbers exactly.
+7. Preserve deadlines exactly.
+8. Preserve amounts exactly.
+9. Cite document names.
+10. Cite page numbers whenever available.
+11. If documents conflict, explicitly explain the conflict.
+12. Never silently choose one conflicting source.
+13. Communicate uncertainty.
+14. The certainty level MUST NOT exceed retrieval confidence.
+15. If confidence is Moderate, certainty cannot be High.
+16. If confidence is Low, certainty must be Low.
+17. Be concise but useful.
+
+RETRIEVAL CONFIDENCE:
+{confidence:.2f} ({level})
 
 USER QUESTION:
-
 {question}
 
 DOCUMENT EVIDENCE:
-
-{evidence_text}
+{evidence}
 
 Return:
 
@@ -656,10 +1113,19 @@ ANSWER:
 <answer>
 
 SOURCES:
-- <document name and page>
+- <document> — <page>
+- <document> — <page>
+
+CERTAINTY:
+<High / Moderate / Low>
+
+NOTE:
+<uncertainty or conflict note>
+If none, write:
+None
 """
 
-    return ask_gemini(
+    return generate_text(
         prompt
     )
 
@@ -668,114 +1134,203 @@ SOURCES:
 # CONTRADICTION DETECTION
 # ============================================================
 
-def detect_contradictions(
-    chunks
-):
+def detect_contradictions():
 
-    if len(chunks) < 2:
+    if len(
+        st.session_state.chunks
+    ) < 2:
 
         return (
-            "Not enough documents to perform "
-            "a contradiction analysis."
+            "Not enough evidence sections are "
+            "available for contradiction analysis."
         )
 
-    selected_chunks = chunks[:20]
+    selected = (
+        st.session_state.chunks[:40]
+    )
 
     evidence = []
 
     for index, chunk in enumerate(
-        selected_chunks,
+        selected,
         start=1
     ):
 
-        page = (
-            str(chunk["page"])
-            if chunk["page"]
-            else "N/A"
-        )
-
         evidence.append(
             f"""
-DOCUMENT SECTION {index}
+SECTION {index}
 
-Document: {chunk["source"]}
-Page: {page}
+Document:
+{chunk["source"]}
+
+Page:
+{page_label(chunk["page"])}
+
+Type:
+{chunk["type"]}
 
 CONTENT:
 {chunk["text"]}
 """
         )
 
-    evidence_text = "\n".join(
-        evidence
-    )
-
     prompt = f"""
-You are the contradiction-analysis engine
-of DocuLens AI.
+You are the contradiction-detection
+engine of DocuLens AI.
 
-Analyze the uploaded document evidence below.
+Compare the supplied document sections.
 
-Identify meaningful factual conflicts between
-different documents.
+Find genuine conflicts where two or more
+sources make incompatible claims about
+the same topic.
 
-Look especially for conflicts involving:
+Check especially:
 
-- dates
 - deadlines
+- dates
 - names
 - numbers
-- policies
+- amounts
 - requirements
+- policies
 - quantities
 - locations
 - instructions
+- project information
 
-IMPORTANT:
+Do NOT report a contradiction if:
 
-Do NOT call something a contradiction merely
-because two documents discuss different topics.
+- documents discuss different topics
+- values are compatible
+- one source simply contains additional information
+- the difference is not meaningful
 
-Only report a contradiction when two sources
-make genuinely incompatible claims about
-the same subject.
-
-If no meaningful contradiction exists, say:
+If there are no genuine contradictions,
+return exactly:
 
 NO CONTRADICTIONS DETECTED
 
-If a contradiction exists, use:
+Otherwise use:
 
-⚠️ POTENTIAL CONTRADICTION
+POTENTIAL CONTRADICTION
 
-Topic:
+TOPIC:
 <topic>
 
-Source A:
+SOURCE A:
 <document and page>
 
-Claim A:
+CLAIM A:
 <claim>
 
-Source B:
+SOURCE B:
 <document and page>
 
-Claim B:
+CLAIM B:
 <claim>
 
-Why this matters:
+WHY THIS MATTERS:
 <short explanation>
 
-Do not invent information.
+RECOMMENDED ACTION:
+<short verification recommendation>
+
+CONFIDENCE:
+<High / Moderate / Low>
+
+Never invent a claim.
 
 DOCUMENT EVIDENCE:
-
-{evidence_text}
+{"".join(evidence)}
 """
 
-    return ask_gemini(
+    return generate_text(
         prompt
     )
+
+
+def count_conflicts(text):
+
+    if not text:
+        return 0
+
+    if (
+        "NO CONTRADICTIONS DETECTED"
+        in text.upper()
+    ):
+        return 0
+
+    return text.upper().count(
+        "POTENTIAL CONTRADICTION"
+    )
+
+
+# ============================================================
+# METRICS
+# ============================================================
+
+def show_metrics():
+
+    documents = len(
+        st.session_state.documents
+    )
+
+    sections = len(
+        st.session_state.chunks
+    )
+
+    conflicts = count_conflicts(
+        st.session_state.contradictions
+    )
+
+    investigations = len(
+        st.session_state.history
+    )
+
+    columns = st.columns(4)
+
+    metrics = [
+        (
+            documents,
+            "📄 Documents"
+        ),
+        (
+            sections,
+            "🧩 Evidence Sections"
+        ),
+        (
+            conflicts,
+            "⚠️ Conflicts"
+        ),
+        (
+            investigations,
+            "🔎 Investigations"
+        )
+    ]
+
+    for column, (
+        number,
+        label
+    ) in zip(
+        columns,
+        metrics
+    ):
+
+        with column:
+
+            st.markdown(
+                f"""
+<div class="metric">
+    <div class="metric-number">
+        {number}
+    </div>
+    <div class="metric-label">
+        {label}
+    </div>
+</div>
+""",
+                unsafe_allow_html=True
+            )
 
 
 # ============================================================
@@ -783,18 +1338,26 @@ DOCUMENT EVIDENCE:
 # ============================================================
 
 st.markdown(
-    '<div class="main-title">'
-    '🔎 DocuLens AI'
-    '</div>',
-    unsafe_allow_html=True
+"""
+<div class="title">
+    🔎 DocuLens AI
+</div>
+""",
+unsafe_allow_html=True
 )
 
 st.markdown(
-    '<div class="subtitle">'
-    'Intelligent Document Investigation Platform'
-    '</div>',
-    unsafe_allow_html=True
+"""
+<div class="subtitle">
+    Intelligent Document Investigation —
+    Evidence • Sources • Conflicts • Uncertainty
+</div>
+""",
+unsafe_allow_html=True
 )
+
+if st.session_state.documents:
+    show_metrics()
 
 
 # ============================================================
@@ -812,102 +1375,123 @@ with st.sidebar:
         type=[
             "pdf",
             "docx",
-            "txt"
+            "txt",
+            "png",
+            "jpg",
+            "jpeg",
+            "webp"
         ],
-        accept_multiple_files=True
+        accept_multiple_files=True,
+        help=(
+            "PDF, DOCX, TXT and image files are supported."
+        )
     )
 
     if uploaded_files:
 
         st.write(
-            f"**{len(uploaded_files)} "
-            "document(s) selected**"
+            f"**{len(uploaded_files)} file(s) selected**"
         )
 
         if st.button(
             "🚀 Process Documents",
+            type="primary",
             use_container_width=True
         ):
 
-            with st.spinner(
-                "Extracting and indexing documents..."
+            all_pages = []
+
+            status = st.empty()
+
+            for index, uploaded_file in enumerate(
+                uploaded_files,
+                start=1
             ):
 
-                all_chunks = []
+                status.info(
+                    f"Reading "
+                    f"{index}/{len(uploaded_files)}: "
+                    f"{uploaded_file.name}"
+                )
 
-                for file in uploaded_files:
+                try:
 
-                    chunks = (
-                        process_uploaded_file(
-                            file
-                        )
+                    extracted = extract_file(
+                        uploaded_file
                     )
 
-                    all_chunks.extend(
+                    if extracted:
+
+                        all_pages.extend(
+                            extracted
+                        )
+
+                    else:
+
+                        st.warning(
+                            f"No readable content found in "
+                            f"{uploaded_file.name}"
+                        )
+
+                except Exception as error:
+
+                    st.error(
+                        f"Could not process "
+                        f"{uploaded_file.name}: "
+                        f"{error}"
+                    )
+
+            status.empty()
+
+            chunks = make_chunks(
+                all_pages
+            )
+
+            if not chunks:
+
+                st.error(
+                    "No readable content was extracted. "
+                    "Please check your files."
+                )
+
+            else:
+
+                with st.spinner(
+                    "🧠 Building semantic evidence index..."
+                ):
+
+                    indexed = build_index(
                         chunks
                     )
 
-                if not all_chunks:
+                st.session_state.chunks = indexed
 
-                    st.error(
-                        "No readable text was found "
-                        "in the uploaded documents."
-                    )
+                st.session_state.documents = [
+                    file.name
+                    for file in uploaded_files
+                ]
 
-                else:
+                st.session_state.contradictions = ""
+                st.session_state.last_answer = ""
+                st.session_state.last_question = ""
+                st.session_state.last_retrieved = []
+                st.session_state.history = []
+                st.session_state.processed = True
 
-                    st.session_state.chunks = (
-                        build_index(
-                            all_chunks
-                        )
-                    )
-
-                    st.session_state.documents = [
-                        file.name
-                        for file in uploaded_files
-                    ]
-
-                    st.session_state.contradictions = []
-
-                    st.success(
-                        f"Indexed "
-                        f"{len(st.session_state.chunks)} "
-                        "document sections."
-                    )
+                st.success(
+                    f"Processed "
+                    f"{len(uploaded_files)} document(s) "
+                    f"and indexed "
+                    f"{len(indexed)} evidence section(s)."
+                )
 
     st.divider()
 
     st.subheader(
-        "📊 Collection"
+        "📚 Current Collection"
     )
 
-    col1, col2 = st.columns(2)
-
-    with col1:
-
-        st.metric(
-            "Documents",
-            len(
-                st.session_state.documents
-            )
-        )
-
-    with col2:
-
-        st.metric(
-            "Sections",
-            len(
-                st.session_state.chunks
-            )
-        )
-
     if st.session_state.documents:
-
-        st.divider()
-
-        st.subheader(
-            "📚 Documents"
-        )
 
         for document in (
             st.session_state.documents
@@ -917,6 +1501,17 @@ with st.sidebar:
                 f"📄 {document}"
             )
 
+        st.caption(
+            f"{len(st.session_state.chunks)} "
+            f"evidence sections indexed"
+        )
+
+    else:
+
+        st.caption(
+            "No documents processed yet."
+        )
+
     st.divider()
 
     if st.button(
@@ -925,129 +1520,151 @@ with st.sidebar:
     ):
 
         st.session_state.chunks = []
-
         st.session_state.documents = []
-
         st.session_state.history = []
-
-        st.session_state.contradictions = []
+        st.session_state.contradictions = ""
+        st.session_state.last_answer = ""
+        st.session_state.last_question = ""
+        st.session_state.last_retrieved = []
+        st.session_state.processed = False
 
         st.rerun()
+
+
+# ============================================================
+# EMPTY STATE
+# ============================================================
+
+if not st.session_state.chunks:
+
+    st.markdown(
+"""
+<div class="hero">
+
+<h2>
+    🕵️ Investigate Your Documents
+</h2>
+
+<p>
+    Upload multiple documents, ask
+    natural-language questions, inspect
+    supporting evidence and detect
+    conflicting claims.
+</p>
+
+<p>
+    Supports
+    <b>PDF, DOCX, TXT and Images</b>.
+    Scanned PDF pages and images are
+    OCR-processed so their information
+    can also be retrieved.
+</p>
+
+</div>
+""",
+        unsafe_allow_html=True
+    )
+
+    st.info(
+        "👈 Upload documents from the sidebar "
+        "and click Process Documents."
+    )
+
+    columns = st.columns(4)
+
+    cards = [
+        (
+            "📄",
+            "Multi-format",
+            "PDF • DOCX • TXT • Images"
+        ),
+        (
+            "🔎",
+            "Smart Q&A",
+            "Natural-language investigation"
+        ),
+        (
+            "📌",
+            "Evidence",
+            "Sources and page references"
+        ),
+        (
+            "⚠️",
+            "Conflicts",
+            "Cross-document contradiction detection"
+        )
+    ]
+
+    for column, (
+        icon,
+        title,
+        description
+    ) in zip(
+        columns,
+        cards
+    ):
+
+        with column:
+
+            st.markdown(
+                f"""
+<div class="metric">
+
+<h3>
+    {icon} {title}
+</h3>
+
+<div class="small">
+    {description}
+</div>
+
+</div>
+""",
+                unsafe_allow_html=True
+            )
 
 
 # ============================================================
 # MAIN APPLICATION
 # ============================================================
 
-if not st.session_state.chunks:
-
-    st.markdown(
-        """
-        <div class="hero-box">
-
-        ### 🕵️ Investigate Your Documents
-
-        Upload multiple documents and ask questions
-        using natural language.
-
-        DocuLens AI retrieves relevant evidence,
-        generates grounded answers and identifies
-        potential conflicts between documents.
-
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-    st.info(
-        "👈 Upload documents from the sidebar "
-        "to begin an investigation."
-    )
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-
-        st.markdown(
-            """
-            <div class="feature-card">
-
-            ### 📄 Upload
-
-            Upload PDF, DOCX or TXT documents.
-
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-
-    with col2:
-
-        st.markdown(
-            """
-            <div class="feature-card">
-
-            ### 🔎 Investigate
-
-            Ask natural-language questions
-            across your document collection.
-
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-
-    with col3:
-
-        st.markdown(
-            """
-            <div class="feature-card">
-
-            ### ⚠️ Detect Conflicts
-
-            Identify potential contradictions
-            between documents.
-
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-
-
 else:
 
-    tab1, tab2, tab3 = st.tabs(
+    (
+        tab_investigate,
+        tab_conflicts,
+        tab_overview,
+        tab_history
+    ) = st.tabs(
         [
             "🔎 Investigation",
             "⚠️ Contradictions",
+            "📊 Investigation Overview",
             "🕘 History"
         ]
     )
 
 
     # ========================================================
-    # INVESTIGATION TAB
+    # INVESTIGATION
     # ========================================================
 
-    with tab1:
+    with tab_investigate:
 
         st.subheader(
             "💬 Ask Your Documents"
         )
 
-        # IMPORTANT:
-        # Using a Streamlit form makes ENTER submit
-        # the question instead of requiring a button click.
-
         with st.form(
-            key="investigation_form",
+            "question_form",
             clear_on_submit=False
         ):
 
             question = st.text_input(
                 "What would you like to investigate?",
                 placeholder=(
-                    "Type your question and press Enter..."
+                    "Example: "
+                    "What is the project report submission date?"
                 )
             )
 
@@ -1067,179 +1684,375 @@ else:
 
             else:
 
-                with st.spinner(
-                    "🕵️ Investigating your documents..."
-                ):
+                try:
 
-                    try:
+                    with st.spinner(
+                        "🕵️ Searching evidence across all documents..."
+                    ):
 
-                        retrieved = retrieve_chunks(
-                            question,
-                            st.session_state.chunks
+                        retrieved = retrieve(
+                            question
                         )
 
-                        answer = generate_answer(
+                        answer = answer_question(
                             question,
                             retrieved
                         )
 
-                    except Exception as error:
-
-                        st.error(
-                            "Something went wrong "
-                            "during the investigation."
-                        )
-
-                        st.code(
-                            str(error)
-                        )
-
-                        st.stop()
-
-                st.markdown(
-                    "### 🤖 Investigation Result"
-                )
-
-                st.markdown(
-                    f"""
-                    <div class="answer-box">
-                    {answer}
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-
-                st.markdown(
-                    "### 📌 Supporting Evidence"
-                )
-
-                for (
-                    score,
-                    chunk
-                ) in retrieved:
-
-                    if score >= 0.70:
-                        confidence = "🟢 Strong"
-
-                    elif score >= 0.50:
-                        confidence = "🟡 Moderate"
-
-                    else:
-                        confidence = "🔴 Weak"
-
-                    page_text = (
-                        f"Page {chunk['page']}"
-                        if chunk["page"]
-                        else "Page N/A"
+                    st.session_state.last_question = (
+                        question
                     )
 
-                    with st.expander(
-                        f"📄 {chunk['source']} — "
-                        f"{page_text} — "
-                        f"{confidence}"
-                    ):
+                    st.session_state.last_answer = (
+                        answer
+                    )
 
-                        st.write(
-                            chunk["text"]
-                        )
+                    st.session_state.last_retrieved = (
+                        retrieved
+                    )
 
-                        st.caption(
-                            f"Relevance score: {score:.2f}"
-                        )
-
-                st.session_state.history.append(
-                    {
-                        "question": question,
-                        "answer": answer
-                    }
-                )
-
-
-    # ========================================================
-    # CONTRADICTION TAB
-    # ========================================================
-
-    with tab2:
-
-        st.subheader(
-            "⚠️ Contradiction Detection"
-        )
-
-        st.write(
-            "Analyze uploaded documents for potential "
-            "conflicts in dates, numbers, requirements, "
-            "policies and other facts."
-        )
-
-        if st.button(
-            "🕵️ Analyze Documents",
-            type="primary",
-            use_container_width=True
-        ):
-
-            with st.spinner(
-                "Comparing document evidence..."
-            ):
-
-                try:
-
-                    contradiction_result = (
-                        detect_contradictions(
-                            st.session_state.chunks
+                    confidence, level, _ = (
+                        calculate_confidence(
+                            retrieved
                         )
                     )
 
-                    st.session_state.contradictions = (
-                        contradiction_result
+                    st.session_state.history.append(
+                        {
+                            "question": question,
+                            "answer": answer,
+                            "confidence": confidence,
+                            "level": level
+                        }
                     )
 
                 except Exception as error:
 
                     st.error(
-                        "Contradiction analysis failed."
+                        "❌ Investigation could not be completed."
                     )
 
-                    st.code(
+                    st.warning(
                         str(error)
                     )
 
-        if st.session_state.contradictions:
+                    st.info(
+                        "If Gemini is temporarily busy, "
+                        "wait a few seconds and click "
+                        "Investigate again."
+                    )
 
-            result = (
-                st.session_state.contradictions
+
+        if st.session_state.last_answer:
+
+            st.markdown(
+                "### 🤖 Investigation Result"
             )
 
-            if (
-                "NO CONTRADICTIONS DETECTED"
-                in result.upper()
+            show_confidence(
+                st.session_state.last_retrieved
+            )
+
+            st.markdown(
+"""
+<div class="result-card">
+""",
+                unsafe_allow_html=True
+            )
+
+            st.markdown(
+                st.session_state.last_answer
+            )
+
+            st.markdown(
+"""
+</div>
+""",
+                unsafe_allow_html=True
+            )
+
+            st.markdown(
+                "### 📌 Supporting Evidence"
+            )
+
+            for rank, (
+                score,
+                chunk
+            ) in enumerate(
+                st.session_state.last_retrieved,
+                start=1
             ):
 
+                if score >= 0.70:
+
+                    strength = "🟢 Strong"
+
+                elif score >= 0.50:
+
+                    strength = "🟡 Moderate"
+
+                else:
+
+                    strength = "🔴 Weak"
+
+                title = (
+                    f"{rank}. "
+                    f"{chunk['source']} — "
+                    f"{page_label(chunk['page'])} — "
+                    f"{strength}"
+                )
+
+                with st.expander(
+                    title
+                ):
+
+                    st.write(
+                        chunk["text"]
+                    )
+
+                    st.caption(
+                        f"Relevance: {score:.3f} | "
+                        f"Type: {chunk['type']}"
+                    )
+
+            confidence, level, _ = (
+                calculate_confidence(
+                    st.session_state.last_retrieved
+                )
+            )
+
+            if level == "High":
+
                 st.success(
-                    "✅ No meaningful contradictions "
-                    "were detected."
+                    "The retrieved evidence strongly "
+                    "supports this answer. Verify "
+                    "critical decisions against the "
+                    "original documents."
+                )
+
+            elif level == "Moderate":
+
+                st.warning(
+                    "Relevant evidence was found, "
+                    "but this answer should be verified "
+                    "against the cited sources."
                 )
 
             else:
 
-                st.warning(
-                    "⚠️ Potential contradiction(s) detected."
+                st.error(
+                    "Evidence is weak. Treat this answer "
+                    "as uncertain and verify the original "
+                    "documents."
                 )
 
+
+    # ========================================================
+    # CONTRADICTIONS
+    # ========================================================
+
+    with tab_conflicts:
+
+        st.subheader(
+            "⚠️ Cross-Document Contradiction Detection"
+        )
+
+        st.write(
+            "DocuLens compares claims across your "
+            "uploaded documents instead of silently "
+            "choosing one."
+        )
+
+        if st.button(
+            "🕵️ Analyze Documents for Conflicts",
+            type="primary",
+            use_container_width=True
+        ):
+
+            try:
+
+                with st.spinner(
+                    "Comparing claims across documents..."
+                ):
+
+                    st.session_state.contradictions = (
+                        detect_contradictions()
+                    )
+
+            except Exception as error:
+
+                st.error(
+                    "❌ Contradiction analysis "
+                    "could not be completed."
+                )
+
+                st.warning(
+                    str(error)
+                )
+
+                st.info(
+                    "Retry in a few seconds if "
+                    "Gemini is temporarily busy."
+                )
+
+        result = (
+            st.session_state.contradictions
+        )
+
+        if not result:
+
+            st.info(
+                "Click the button above to analyze "
+                "your documents for conflicts."
+            )
+
+        elif (
+            "NO CONTRADICTIONS DETECTED"
+            in result.upper()
+        ):
+
+            st.success(
+                "✅ No meaningful contradictions were detected."
+            )
+
+        else:
+
+            conflicts = count_conflicts(
+                result
+            )
+
+            st.warning(
+                f"⚠️ {conflicts} "
+                f"potential contradiction(s) detected."
+            )
+
             st.markdown(
-                f"""
-                <div class="answer-box">
-                {result}
-                </div>
-                """,
+"""
+<div class="conflict-card">
+""",
                 unsafe_allow_html=True
+            )
+
+            st.markdown(
+                result
+            )
+
+            st.markdown(
+"""
+</div>
+""",
+                unsafe_allow_html=True
+            )
+
+            st.info(
+                "Recommended action: verify conflicting "
+                "claims against the latest official source."
             )
 
 
     # ========================================================
-    # HISTORY TAB
+    # OVERVIEW
     # ========================================================
 
-    with tab3:
+    with tab_overview:
+
+        st.subheader(
+            "📊 Investigation Overview"
+        )
+
+        show_metrics()
+
+        st.divider()
+
+        st.markdown(
+            "### 📚 Document Evidence Map"
+        )
+
+        for document in (
+            st.session_state.documents
+        ):
+
+            count = sum(
+                1
+                for chunk in st.session_state.chunks
+                if chunk["source"] == document
+            )
+
+            st.write(
+                f"📄 **{document}** — "
+                f"{count} evidence section(s)"
+            )
+
+        st.divider()
+
+        st.markdown(
+            "### 🧠 DocuLens Capabilities"
+        )
+
+        capabilities = [
+            "📄 PDF extraction",
+            "🔍 Scanned PDF OCR",
+            "📝 DOCX paragraph extraction",
+            "📊 DOCX table extraction",
+            "📃 TXT extraction",
+            "🖼️ Image OCR",
+            "🔎 Semantic evidence retrieval",
+            "🤖 Grounded natural-language Q&A",
+            "📌 Source and page references",
+            "⚠️ Cross-document contradiction detection",
+            "🟢 High / Moderate / Low confidence",
+            "🕘 Investigation history",
+            "🛡️ Gemini temporary-error retry protection"
+        ]
+
+        for capability in capabilities:
+
+            st.write(
+                f"✅ {capability}"
+            )
+
+        st.divider()
+
+        st.markdown(
+            "### 🎯 Investigation Summary"
+        )
+
+        if st.session_state.history:
+
+            average = (
+                sum(
+                    item["confidence"]
+                    for item in st.session_state.history
+                )
+                /
+                len(
+                    st.session_state.history
+                )
+            )
+
+            st.write(
+                "Questions investigated: "
+                f"**{len(st.session_state.history)}**"
+            )
+
+            st.write(
+                "Average evidence confidence: "
+                f"**{average:.0%}**"
+            )
+
+        else:
+
+            st.info(
+                "Ask a question to start building "
+                "your investigation history."
+            )
+
+
+    # ========================================================
+    # HISTORY
+    # ========================================================
+
+    with tab_history:
 
         st.subheader(
             "🕘 Investigation History"
@@ -1253,16 +2066,26 @@ else:
 
         else:
 
-            for item in reversed(
-                st.session_state.history
+            for index, item in enumerate(
+                reversed(
+                    st.session_state.history
+                ),
+                start=1
             ):
 
                 with st.expander(
-                    f"Q: {item['question']}"
+                    f"Investigation {index}: "
+                    f"{item['question']}"
                 ):
 
                     st.write(
                         item["answer"]
+                    )
+
+                    st.caption(
+                        f"Evidence confidence: "
+                        f"{item['confidence']:.0%} "
+                        f"({item['level']})"
                     )
 
 
@@ -1273,6 +2096,7 @@ else:
 st.divider()
 
 st.caption(
-    "DocuLens AI • Evidence-backed intelligent "
-    "document investigation"
+    "DocuLens AI • Intelligent Document Investigation • "
+    "Grounded Answers • Evidence • Conflict Detection • "
+    "Uncertainty Handling"
 )

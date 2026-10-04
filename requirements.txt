@@ -1,6 +1,6 @@
 streamlit
-google-genai
-python-dotenv
-pymupdf
-python-docx
 numpy
+PyMuPDF
+python-docx
+python-dotenv
+google-genai
